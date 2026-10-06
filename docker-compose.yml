@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    image: cold-storage-trajectory:latest
+    container_name: cold-storage-api
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
