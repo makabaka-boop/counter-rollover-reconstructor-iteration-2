@@ -20,6 +20,15 @@ class HandoffSpec(BaseModel):
     openingReading: StrictInt = Field(ge=0)
 
 
+class AnchorSpec(BaseModel):
+    """人工盘点锚点：已有读数位置上的非负真实绝对计数。"""
+
+    model_config = {"extra": "forbid"}
+
+    position: StrictInt = Field(ge=0)
+    absoluteCount: StrictInt = Field(ge=0)
+
+
 class TrajectoryRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -28,6 +37,7 @@ class TrajectoryRequest(BaseModel):
     minStep: list[StrictInt]
     maxStep: list[StrictInt]
     handoff: HandoffSpec | None = None
+    inventoryAnchor: AnchorSpec | None = None
 
     @model_validator(mode="after")
     def _check_constraints(self) -> "TrajectoryRequest":
@@ -81,6 +91,17 @@ class TrajectoryRequest(BaseModel):
                 raise ValueError(
                     "each pair must satisfy 0 <= minStep <= maxStep "
                     "<= 2 * (segment modulus)"
+                )
+
+        anchor = self.inventoryAnchor
+        if anchor is not None:
+            if anchor.position > n - 1:
+                raise ValueError(
+                    "inventoryAnchor.position must be within the readings range"
+                )
+            if self.readings[anchor.position] is None:
+                raise ValueError(
+                    "inventoryAnchor.position must point to an existing reading"
                 )
         return self
 

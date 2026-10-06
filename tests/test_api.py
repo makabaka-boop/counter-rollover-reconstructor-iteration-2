@@ -357,3 +357,134 @@ def test_handoff_float_opening():
 
 def test_handoff_bool_new_modulus():
     _expect_422_ho(handoff={"newModulus": True})
+
+
+# ---------------------------------------------------------------------------
+# 盘点锚点：422 校验、成功/无解响应、交接前/交接点/交接后贯通。
+# ---------------------------------------------------------------------------
+
+ANCHOR_OK = {
+    "modulus": 10,
+    "readings": [8, None, 2],
+    "minStep": [0, 0],
+    "maxStep": [20, 20],
+    "inventoryAnchor": {"position": 2, "absoluteCount": 22},
+}
+
+
+def test_anchor_ok_response_shape():
+    r = post(ANCHOR_OK)
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "status": "OK",
+        "absolute": [8, 8, 22],
+        "increments": [0, 14],
+        "cumulativeWraps": [0, 0, 2],
+    }
+
+
+def test_anchor_null_keeps_original_response():
+    payload = dict(ANCHOR_OK, inventoryAnchor=None)
+    payload["maxStep"] = [6, 6]
+    r = post(payload)
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "status": "OK",
+        "absolute": [8, 8, 12],
+        "increments": [0, 4],
+        "cumulativeWraps": [0, 0, 1],
+    }
+
+
+def test_anchor_inconsistent_response():
+    payload = dict(ANCHOR_OK, inventoryAnchor={"position": 2, "absoluteCount": 23})
+    r = post(payload)
+    assert r.status_code == 200
+    assert r.json() == {"status": "INCONSISTENT", "position": 2}
+
+
+def test_anchor_handoff_after_ok():
+    payload = dict(
+        HO,
+        readings=[8, 2, 40],
+        minStep=[0, 0],
+        maxStep=[20, 100],
+        inventoryAnchor={"position": 2, "absoluteCount": 62},
+    )
+    r = post(payload)
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "status": "OK",
+        "absolute": [8, 22, 62],
+        "increments": [14, 40],
+        "cumulativeWraps": None,
+        "oldMeterWraps": [0, 2, None],
+        "newMeterWraps": [None, 0, 0],
+    }
+
+
+def test_anchor_handoff_at_same_moment():
+    payload = dict(
+        HO,
+        inventoryAnchor={"position": 1, "absoluteCount": 22},
+    )
+    r = post(payload)
+    assert r.status_code == 200
+    assert r.json() == {"status": "INCONSISTENT", "position": 1}
+
+
+def _expect_422_anchor(**changes):
+    payload = dict(ANCHOR_OK)
+    anchor_changes = changes.pop("inventoryAnchor", {})
+    payload.update(changes)
+    if isinstance(anchor_changes, dict):
+        payload["inventoryAnchor"] = dict(
+            ANCHOR_OK["inventoryAnchor"], **anchor_changes
+        )
+    else:
+        payload["inventoryAnchor"] = anchor_changes
+    _expect_422(payload)
+
+
+def test_anchor_unknown_field():
+    _expect_422_anchor(inventoryAnchor={"extra": 1})
+
+
+def test_anchor_missing_count():
+    _expect_422_anchor(inventoryAnchor={"position": 2})
+
+
+def test_anchor_position_beyond_end():
+    _expect_422_anchor(inventoryAnchor={"position": 3})
+
+
+def test_anchor_position_negative():
+    _expect_422_anchor(inventoryAnchor={"position": -1})
+
+
+def test_anchor_position_on_null_reading():
+    _expect_422_anchor(inventoryAnchor={"position": 1})
+
+
+def test_anchor_negative_count():
+    _expect_422_anchor(inventoryAnchor={"absoluteCount": -1})
+
+
+def test_anchor_float_count():
+    _expect_422_anchor(inventoryAnchor={"absoluteCount": 22.0})
+
+
+def test_anchor_bool_count():
+    _expect_422_anchor(inventoryAnchor={"absoluteCount": True})
+
+
+def test_anchor_string_position():
+    _expect_422_anchor(inventoryAnchor={"position": "2"})
+
+
+def test_anchor_wrong_container_type():
+    _expect_422_anchor(inventoryAnchor=[2, 22])
+
+
+def test_anchor_empty_object():
+    _expect_422_anchor(inventoryAnchor={})
