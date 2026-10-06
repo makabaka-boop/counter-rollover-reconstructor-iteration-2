@@ -8,8 +8,12 @@
 from __future__ import annotations
 
 
-def brute_solve(modulus, readings, min_steps, max_steps):
-    """返回 ("ok", absolute) 或 ("inconsistent", position)。"""
+def brute_solve(modulus, readings, min_steps, max_steps, anchor=None):
+    """返回 ("ok", absolute) 或 ("inconsistent", position)。
+
+    anchor 可选为 (position, absolute_count)。锚点在首位时会固定首项，
+    否则首项仍按 readings[0] 起算。
+    """
     n = len(readings)
     m = modulus
     best = None  # (final_value, tuple(A))
@@ -17,6 +21,8 @@ def brute_solve(modulus, readings, min_steps, max_steps):
     def dfs(i, A):
         nonlocal best
         v = readings[i]
+        if anchor is not None and i == anchor[0] and A[-1] != anchor[1]:
+            return
         if v is not None and A[-1] % m != v:
             return
         if i == n - 1:
@@ -29,19 +35,22 @@ def brute_solve(modulus, readings, min_steps, max_steps):
             dfs(i + 1, A)
             A.pop()
 
-    dfs(0, [readings[0]])
+    start = anchor[1] if anchor is not None and anchor[0] == 0 else readings[0]
+    dfs(0, [start])
     if best is None:
         return ("inconsistent", earliest_blocked(modulus, readings, min_steps, max_steps))
     return ("ok", list(best[1]))
 
 
-def prefix_feasible(modulus, readings, min_steps, max_steps, p):
+def prefix_feasible(modulus, readings, min_steps, max_steps, p, anchor=None):
     """位置 0..p 的前缀是否存在合法赋值（p 处若已知须匹配读数）。"""
     n = len(readings)
     m = modulus
 
     def dfs(i, A):
         v = readings[i]
+        if anchor is not None and i == anchor[0] and A[-1] != anchor[1]:
+            return False
         if v is not None and A[-1] % m != v:
             return False
         if i == p:
@@ -54,13 +63,16 @@ def prefix_feasible(modulus, readings, min_steps, max_steps, p):
             A.pop()
         return False
 
-    return dfs(0, [readings[0]])
+    start = anchor[1] if anchor is not None and anchor[0] == 0 else readings[0]
+    return dfs(0, [start])
 
 
-def earliest_blocked(modulus, readings, min_steps, max_steps):
+def earliest_blocked(modulus, readings, min_steps, max_steps, anchor=None):
     n = len(readings)
-    for p in range(1, n):
-        if not prefix_feasible(modulus, readings, min_steps, max_steps, p):
+    for p in range(0, n):
+        if not prefix_feasible(
+            modulus, readings, min_steps, max_steps, p, anchor
+        ):
             return p
     return None
 
@@ -81,14 +93,21 @@ def _handoff_residue_ok(old_modulus, new_modulus, opening, position, readings, A
 
 
 def brute_solve_handoff(old_modulus, readings, min_steps, max_steps,
-                        position, new_modulus, opening):
-    """返回 ("ok", absolute, old_wraps, new_wraps) 或 ("inconsistent", position)。"""
+                        position, new_modulus, opening, anchor=None):
+    """返回 ("ok", absolute, old_wraps, new_wraps) 或 ("inconsistent", position)。
+
+    anchor 可选为 (position, absolute_count)。锚点在首位时直接固定首项；
+    当交接也在首位时，锚点可反推出交接时旧表已有累计数，因此需枚举可能
+    的交接值。
+    """
     n = len(readings)
     assert readings[position] is not None  # 交接点必须是旧表最后一次读数
     best = None  # (final_value, tuple(A))
 
     def dfs(i, A):
         nonlocal best
+        if anchor is not None and i == anchor[0] and A[-1] != anchor[1]:
+            return
         if not _handoff_residue_ok(
             old_modulus, new_modulus, opening, position, readings, A, i
         ):
@@ -103,7 +122,14 @@ def brute_solve_handoff(old_modulus, readings, min_steps, max_steps,
             dfs(i + 1, A)
             A.pop()
 
-    dfs(0, [readings[0]])
+    if position == 0 and anchor is not None:
+        starts = range(readings[0], readings[0] + sum(max_steps) + 1, old_modulus)
+    elif anchor is not None and anchor[0] == 0:
+        starts = [anchor[1]]
+    else:
+        starts = [readings[0]]
+    for start in starts:
+        dfs(0, [start])
     if best is None:
         return (
             "inconsistent",
@@ -122,10 +148,12 @@ def brute_solve_handoff(old_modulus, readings, min_steps, max_steps,
 
 
 def prefix_feasible_handoff(old_modulus, readings, min_steps, max_steps,
-                            position, new_modulus, opening, p):
+                            position, new_modulus, opening, p, anchor=None):
     """位置 0..p 的前缀是否存在合法赋值（按两侧各自的模数校验读数）。"""
 
     def dfs(i, A):
+        if anchor is not None and i == anchor[0] and A[-1] != anchor[1]:
+            return False
         if not _handoff_residue_ok(
             old_modulus, new_modulus, opening, position, readings, A, i
         ):
@@ -140,16 +168,24 @@ def prefix_feasible_handoff(old_modulus, readings, min_steps, max_steps,
             A.pop()
         return False
 
-    return dfs(0, [readings[0]])
+    if position == 0 and anchor is not None:
+        for start in range(
+            readings[0], readings[0] + sum(max_steps) + 1, old_modulus
+        ):
+            if dfs(0, [start]):
+                return True
+        return False
+    start = anchor[1] if anchor is not None and anchor[0] == 0 else readings[0]
+    return dfs(0, [start])
 
 
 def earliest_blocked_handoff(old_modulus, readings, min_steps, max_steps,
-                             position, new_modulus, opening):
+                             position, new_modulus, opening, anchor=None):
     n = len(readings)
-    for p in range(1, n):
+    for p in range(0, n):
         if not prefix_feasible_handoff(
             old_modulus, readings, min_steps, max_steps,
-            position, new_modulus, opening, p,
+            position, new_modulus, opening, p, anchor,
         ):
             return p
     return None

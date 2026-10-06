@@ -3,16 +3,16 @@
 from fastapi import FastAPI
 
 from .models import TrajectoryRequest
-from .solver import Handoff, Inconsistent, Solved, solve
+from .solver import Anchor, Handoff, Inconsistent, Solved, solve
 
 app = FastAPI(
     title="冷库机械累计表轨迹恢复",
     description=(
         "恢复跨零回绕的机械累计表绝对计数序列：先最小化最终绝对计数，"
         "再取完整序列字典序最小者；无解返回最早无法延伸的位置。"
-        "可选一次换表交接（handoff），交接后分别给出两台表的回绕次数。"
+        "可选一次换表交接（handoff）与盘点锚点（inventoryAnchor）。"
     ),
-    version="1.1.0",
+    version="1.2.0",
 )
 
 
@@ -30,8 +30,19 @@ def trajectory(req: TrajectoryRequest) -> dict:
             new_modulus=req.handoff.newModulus,
             opening_reading=req.handoff.openingReading,
         )
+    anchor = None
+    if req.inventoryAnchor is not None:
+        anchor = Anchor(
+            position=req.inventoryAnchor.position,
+            absolute_count=req.inventoryAnchor.absoluteCount,
+        )
     result = solve(
-        req.modulus, req.readings, req.minStep, req.maxStep, handoff
+        req.modulus,
+        req.readings,
+        req.minStep,
+        req.maxStep,
+        handoff,
+        anchor,
     )
     if isinstance(result, Inconsistent):
         return {"status": "INCONSISTENT", "position": result.position}

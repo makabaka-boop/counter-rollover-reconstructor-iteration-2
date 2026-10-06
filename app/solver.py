@@ -36,9 +36,15 @@
 
     A[i] = A[h] + B[i] - s,   i >= h.
 
-两段除共享物理时点 ``A[h]`` 外无耦合，各自满足“先最小化末值、再字典序
-最小”即拼成整条轨迹的两级最优；两台表的回绕次数分别列出，新表清零不产生
-负耗用（真实轨迹只增不减，新表段增量仍逐边受 minStep/maxStep 约束）。
+盘点锚点（``anchor``）
+----------------------
+
+锚点指定一个已有读数位置 p 和该位置经人工核准的非负绝对计数 C。若锚点在
+旧表段，它直接固定旧表绝对计数；若在新表段，则由
+
+    C = A[h] + B[p] - s
+
+联合决定交接值与新表自身计数，不能把两段分别取无约束最优后再拼接。
 """
 
 from dataclasses import dataclass
@@ -56,6 +62,15 @@ class Handoff:
     position: int
     new_modulus: int
     opening_reading: int
+
+
+@dataclass(frozen=True)
+class Anchor:
+    """盘点锚点：``position`` 处已有读数，且其人工核准绝对计数为
+    ``absolute_count``。"""
+
+    position: int
+    absolute_count: int
 
 
 @dataclass(frozen=True)
@@ -95,14 +110,61 @@ def solve(
     min_steps: list[int],
     max_steps: list[int],
     handoff: Handoff | None = None,
+    anchor: Anchor | None = None,
 ) -> Result:
     if handoff is not None:
         return _solve_with_handoff(
-            modulus, readings, min_steps, max_steps, handoff
+            modulus, readings, min_steps, max_steps, handoff, anchor
+        )
+    if anchor is not None:
+        return _solve_plain_with_anchor(
+            modulus, readings, min_steps, max_steps, anchor
         )
 
     return _solve_segment(
         modulus, readings, min_steps, max_steps, readings[0]
+    )
+
+
+def _solve_plain_with_anchor(
+    m: int,
+    readings: list[int | None],
+    min_steps: list[int],
+    max_steps: list[int],
+    anchor: Anchor,
+) -> Result:
+    """无交接但有锚点：在锚点处拆成前后两段。前段末端被锚点固定，后段从
+    固定的锚点绝对值继续按原两级目标求解。"""
+    p = anchor.position
+    value = anchor.absolute_count
+
+    first_value = value if p == 0 else readings[0]
+    prefix = _solve_segment(
+        m,
+        readings[: p + 1],
+        min_steps[:p],
+        max_steps[:p],
+        first_value,
+        fixed_final_value=value,
+    )
+    if isinstance(prefix, Inconsistent):
+        return prefix
+
+    suffix = _solve_segment(
+        m,
+        readings[p:],
+        min_steps[p:],
+        max_steps[p:],
+        value,
+    )
+    if isinstance(suffix, Inconsistent):
+        return Inconsistent(p + suffix.position)
+
+    absolute, increments = _join_segments(prefix, suffix)
+    return Solved(
+        absolute=absolute,
+        increments=increments,
+        cumulative_wraps=[a // m for a in absolute],
     )
 
 
@@ -112,36 +174,216 @@ def _solve_with_handoff(
     min_steps: list[int],
     max_steps: list[int],
     handoff: Handoff,
+    anchor: Anchor | None = None,
 ) -> Result:
-    """两段拼接：旧表段 [0..h]（旧模数）与新表段 [h..n-1]（新模数）。
-
-    交接位置 ``h`` 处两段共享同一个物理累计值 ``A[h]``，但新表自身的计数
-    从 ``opening_reading`` 起步（新表回绕数从 0 计起）：
-        A[i] = A[h] + B[i] - opening,   i >= h，
-    其中 B 为新表自身的绝对计数。两段之间没有任何步长跨越（交接耗用为
-    零），故两级目标可分别求解：先各自最小化末值（共同最小化 A[-1]），
-    再各自字典序最小（拼成整条轨迹的字典序最小）。
-    """
+    """旧表段 [0..h] 与新表段 [h..n-1] 在交接点共享物理累计值。"""
     n = len(readings)
     h = handoff.position
     m_new = handoff.new_modulus
     opening = handoff.opening_reading
 
-    # 旧表段：positions 0..h，边 0..h-1。
-    old_res = _solve_segment(
+    if anchor is None:
+        old_res = _solve_segment(
+            old_modulus,
+            readings[: h + 1],
+            min_steps[:h],
+            max_steps[:h],
+            readings[0],
+        )
+        if isinstance(old_res, Inconsistent):
+            return old_res
+        return _finish_handoff(
+            readings,
+            min_steps,
+            max_steps,
+            handoff,
+            old_res,
+        )
+
+    p = anchor.position
+    value = anchor.absolute_count
+
+    if p <= h:
+        # 锚点位于交接前或交接点：它固定旧表段中的一个值。若在交接点，这也
+        # 是同一物理时刻的交接值；若在交接前，旧表后缀仍取最小交接值。
+        old_first = value if p == 0 else readings[0]
+        if p == h:
+            old_res = _solve_segment(
+                old_modulus,
+                readings[: h + 1],
+                min_steps[:h],
+                max_steps[:h],
+                old_first,
+                fixed_final_value=value,
+            )
+            if isinstance(old_res, Inconsistent):
+                return old_res
+        else:
+            prefix = _solve_segment(
+                old_modulus,
+                readings[: p + 1],
+                min_steps[:p],
+                max_steps[:p],
+                old_first,
+                fixed_final_value=value,
+            )
+            if isinstance(prefix, Inconsistent):
+                return prefix
+            suffix = _solve_segment(
+                old_modulus,
+                readings[p : h + 1],
+                min_steps[p:h],
+                max_steps[p:h],
+                value,
+            )
+            if isinstance(suffix, Inconsistent):
+                return Inconsistent(p + suffix.position)
+            old_absolute, old_increments = _join_segments(prefix, suffix)
+            old_res = Solved(
+                absolute=old_absolute,
+                increments=old_increments,
+                cumulative_wraps=[a // old_modulus for a in old_absolute],
+            )
+
+        return _finish_handoff(
+            readings,
+            min_steps,
+            max_steps,
+            handoff,
+            old_res,
+        )
+
+    # 锚点位于交接之后。设 r_h/r_p 为两侧读数，w/k 分别为交接值、新表锚点
+    # 自身计数中的整圈数：
+    #   A[h] = r_h + m0*w
+    #   B[p] = r_p + m1*k
+    #   C = A[h] + B[p] - opening
+    # 因此 m0*w + m1*k = C-r_h-r_p+opening。
+    r_h = readings[h]
+    r_p = readings[p]
+
+    old_bounds = _forward_bounds(
         old_modulus,
         readings[: h + 1],
         min_steps[:h],
         max_steps[:h],
         readings[0],
     )
-    if isinstance(old_res, Inconsistent):
-        return old_res
-    assert old_res.old_meter_wraps is None and old_res.new_meter_wraps is None
+    if isinstance(old_bounds, Inconsistent):
+        return old_bounds
+    _, old_lo, old_hi = old_bounds
+    if h == 0:
+        # 起点即换表时，旧表在交接前没有任何边；锚点可能反推出交接时旧表
+        # 已有的真实累计数 r_h + m0*w（w 可取任意非负整数）。
+        old_hi[-1] = None
 
-    # 新表段：positions h..n-1，边 h..n-2。局部首值固定为开表读数（新表
-    # 此刻尚未回绕）；注意交接位置的旧表读数 readings[h] 不属于新表，新表
-    # 在该位置的读数是 opening，必须替换后再切片。
+    new_prefix_readings = [opening] + readings[h + 1 : p + 1]
+    new_bounds = _forward_bounds(
+        m_new,
+        new_prefix_readings,
+        min_steps[h:p],
+        max_steps[h:p],
+        opening,
+    )
+    if isinstance(new_bounds, Inconsistent):
+        return Inconsistent(h + new_bounds.position)
+    _, new_lo, new_hi = new_bounds
+
+    pair = _smallest_nonnegative_linear_pair(
+        old_modulus,
+        m_new,
+        value - r_h - r_p + opening,
+        old_lo[-1],
+        old_hi[-1],
+        new_lo[-1],
+        new_hi[-1],
+    )
+    if pair is None:
+        return Inconsistent(p)
+    w, k = pair
+
+    join_value = r_h + old_modulus * w
+    anchor_self_value = r_p + m_new * k
+
+    if h == 0:
+        # 起点即换表时没有旧表边，交接值由锚点联合反解得到，不能再把它
+        # 固定成 readings[0] 对应的零圈读数。
+        old_res = Solved(
+            absolute=[join_value],
+            increments=[],
+            cumulative_wraps=[join_value // old_modulus],
+        )
+    else:
+        old_res = _solve_segment(
+            old_modulus,
+            readings[: h + 1],
+            min_steps[:h],
+            max_steps[:h],
+            readings[0],
+            fixed_final_value=join_value,
+        )
+        if isinstance(old_res, Inconsistent):
+            return old_res
+
+    new_prefix_res = _solve_segment(
+        m_new,
+        new_prefix_readings,
+        min_steps[h:p],
+        max_steps[h:p],
+        opening,
+        fixed_final_value=anchor_self_value,
+    )
+    if isinstance(new_prefix_res, Inconsistent):
+        return Inconsistent(h + new_prefix_res.position)
+
+    new_suffix_res = _solve_segment(
+        m_new,
+        readings[p:],
+        min_steps[p:],
+        max_steps[p:],
+        anchor_self_value,
+    )
+    if isinstance(new_suffix_res, Inconsistent):
+        return Inconsistent(p + new_suffix_res.position)
+
+    new_self_absolute, new_self_increments = _join_segments(
+        new_prefix_res, new_suffix_res
+    )
+    shift = join_value - opening
+    absolute = old_res.absolute + [
+        b + shift for b in new_self_absolute[1:]
+    ]
+    increments = old_res.increments + new_self_increments
+
+    old_wraps: list[int | None] = [
+        a // old_modulus for a in old_res.absolute
+    ] + [None] * (n - h - 1)
+    new_wraps: list[int | None] = [None] * h + [
+        b // m_new for b in new_self_absolute
+    ]
+
+    return Solved(
+        absolute=absolute,
+        increments=increments,
+        cumulative_wraps=None,
+        old_meter_wraps=old_wraps,
+        new_meter_wraps=new_wraps,
+    )
+
+
+def _finish_handoff(
+    readings: list[int | None],
+    min_steps: list[int],
+    max_steps: list[int],
+    handoff: Handoff,
+    old_res: Solved,
+) -> Result:
+    """给定已求好的旧表段，求无锚点约束的新表段并拼接。"""
+    n = len(readings)
+    h = handoff.position
+    m_new = handoff.new_modulus
+    opening = handoff.opening_reading
+
     new_res = _solve_segment(
         m_new,
         [opening] + readings[h + 1:],
@@ -150,19 +392,18 @@ def _solve_with_handoff(
         opening,
     )
     if isinstance(new_res, Inconsistent):
-        return Inconsistent(new_res.position + h)
+        return Inconsistent(h + new_res.position)
 
     join_value = old_res.absolute[-1]
     shift = join_value - opening
-
     absolute = old_res.absolute + [
         b + shift for b in new_res.absolute[1:]
     ]
     increments = old_res.increments + new_res.increments
 
-    old_wraps: list[int | None] = list(old_res.cumulative_wraps) + [None] * (
-        n - h - 1
-    )
+    old_wraps: list[int | None] = list(old_res.cumulative_wraps) + [
+        None
+    ] * (n - h - 1)
     new_wraps: list[int | None] = [None] * h + list(
         new_res.cumulative_wraps
     )
@@ -176,23 +417,84 @@ def _solve_with_handoff(
     )
 
 
-def _solve_segment(
+def _join_segments(left: Solved, right: Solved) -> tuple[list[int], list[int]]:
+    """拼接首尾值相同的两个相邻段结果。"""
+    return (
+        left.absolute + right.absolute[1:],
+        left.increments + right.increments,
+    )
+
+
+def _smallest_nonnegative_linear_pair(
+    a: int,
+    b: int,
+    c: int,
+    w_lo: int,
+    w_hi: int | None,
+    k_lo: int,
+    k_hi: int,
+) -> tuple[int, int] | None:
+    """求使最终绝对计数最小的 (w,k)；并列时取最小 w（即最小交接值）。"""
+    g, x0, y0 = _extended_gcd(a, b)
+    if c % g != 0:
+        return None
+
+    scale = c // g
+    w0 = x0 * scale
+    k0 = y0 * scale
+    w_step = b // g
+    k_step = a // g
+
+    # w = w0 + w_step*t;  k = k0 - k_step*t。
+    t_lo = max(
+        _ceil_div(w_lo - w0, w_step),
+        _ceil_div(k0 - k_hi, k_step),
+    )
+    upper_from_w = (
+        (w_hi - w0) // w_step
+        if w_hi is not None
+        else None
+    )
+    t_hi = (k0 - k_lo) // k_step
+    if upper_from_w is not None:
+        t_hi = min(t_hi, upper_from_w)
+    if t_lo > t_hi:
+        return None
+
+    w = w0 + w_step * t_lo
+    k = k0 - k_step * t_lo
+    return w, k
+
+
+def _extended_gcd(a: int, b: int) -> tuple[int, int, int]:
+    """返回 (g, x, y)，其中 ``a*x + b*y = g = gcd(a,b)``。"""
+    old_r, r = a, b
+    old_s, s = 1, 0
+    old_t, t = 0, 1
+    while r:
+        q = old_r // r
+        old_r, r = r, old_r - q * r
+        old_s, s = s, old_s - q * s
+        old_t, t = t, old_t - q * t
+    return old_r, old_s, old_t
+
+
+def _forward_bounds(
     m: int,
     seg_readings: list[int | None],
     seg_min: list[int],
     seg_max: list[int],
     first_value: int,
-) -> Result:
-    """单子表段的两级最优恢复。``seg_readings[0]`` 必须已知，且首项绝对
-    计数固定为 ``first_value``（满足
-    ``first_value ≡ seg_readings[0] (mod m)``）。返回的下标均为段内局部
-    下标（从 0 起）。"""
+) -> tuple[list[int], list[int], list[int]] | Inconsistent:
+    """前向传播所有已知点的可达回绕次数区间。"""
     n = len(seg_readings)
+    first_r = seg_readings[0]
+    if first_value < 0 or first_value % m != first_r:
+        return Inconsistent(0)
 
     known_idx = [i for i, v in enumerate(seg_readings) if v is not None]
     t = len(known_idx)
 
-    # 步长前缀和，段和 O(1)：smin(a,b)=prefix_min[b]-prefix_min[a]。
     prefix_min = [0] * (n + 1)
     prefix_max = [0] * (n + 1)
     for i in range(n - 1):
@@ -201,9 +503,8 @@ def _solve_segment(
     prefix_min[n] = prefix_min[n - 1]
     prefix_max[n] = prefix_max[n - 1]
 
-    # 每个已知段 j（j=1..t-1）：known_idx[j-1] -> known_idx[j]。
-    seg_qlo = [0] * t      # 段回绕数 q 的下界 ceil((smin-(r_b-r_a))/m)
-    seg_qhi = [0] * t      # 段回绕数 q 的上界 floor((smax-(r_b-r_a))/m)
+    seg_qlo = [0] * t
+    seg_qhi = [0] * t
     for j in range(1, t):
         a = known_idx[j - 1]
         b = known_idx[j]
@@ -212,65 +513,77 @@ def _solve_segment(
         smin = prefix_min[b] - prefix_min[a]
         smax = prefix_max[b] - prefix_max[a]
         e = r_b - r_a
-        seg_qlo[j] = _ceil_div(smin - e, m)
-        seg_qhi[j] = (smax - e) // m
-        # smin>=0 且 r_b-r_a <= m-1 保证 qlo>=0（A 单调不减）。
-        if seg_qlo[j] > seg_qhi[j]:
-            # 段本身就无法在步长范围内凑出总增量；段内未知点总能延伸，
-            # 最早无法匹配的是该已知端点（前 j-1 个已知点均可达）。
+        q_lo = _ceil_div(smin - e, m)
+        q_hi = (smax - e) // m
+        if q_lo > q_hi:
             return Inconsistent(b)
+        seg_qlo[j] = q_lo
+        seg_qhi[j] = q_hi
 
-    # 首项绝对计数 = 余数 + k0*m；旧表段与新开表段均有 k0=0。
-    k0 = (first_value - seg_readings[0]) // m
-
-    # ------------------------------------------------------------------
-    # 1) 前向传播：F_j = [loF_j, hiF_j] 为 k_j 的可达整数区间，k_0 固定。
-    # ------------------------------------------------------------------
+    k0 = (first_value - first_r) // m
     lo_f = [0] * t
     hi_f = [0] * t
     lo_f[0] = hi_f[0] = k0
     for j in range(1, t):
         lo_f[j] = lo_f[j - 1] + seg_qlo[j]
         hi_f[j] = hi_f[j - 1] + seg_qhi[j]
-        # seg_qlo<=seg_qhi 已在段构造时检查；区间相加后只会更宽，不会变空。
 
-    # 最小最终绝对计数 ⇔ 最小 k_{t-1} ⇔ loF_{t-1}。
-    final_k = lo_f[t - 1]
+    return known_idx, lo_f, hi_f
 
-    # ------------------------------------------------------------------
-    # 2) 后向传播：G_j = [loG_j, hiG_j] 由 k_{t-1} = final_k 倒推；
-    #    贪心时允许集合 T_j = F_j ∩ G_j（仍是整数区间）。
-    # ------------------------------------------------------------------
+
+def _solve_segment(
+    m: int,
+    seg_readings: list[int | None],
+    seg_min: list[int],
+    seg_max: list[int],
+    first_value: int,
+    fixed_final_value: int | None = None,
+) -> Result:
+    """单子表段的两级最优恢复。``seg_readings[0]`` 必须已知，且首项绝对
+    计数固定为 ``first_value``（满足同余）。``fixed_final_value`` 可把最后
+    一个已知点固定为盘点锚点值。返回下标均为段内局部下标。"""
+    n = len(seg_readings)
+    bounds = _forward_bounds(
+        m, seg_readings, seg_min, seg_max, first_value
+    )
+    if isinstance(bounds, Inconsistent):
+        return bounds
+    known_idx, lo_f, hi_f = bounds
+    t = len(known_idx)
+
+    final_index = known_idx[t - 1]
+    final_residue = seg_readings[final_index]
+    if fixed_final_value is None:
+        final_k = lo_f[t - 1]
+    else:
+        if (
+            fixed_final_value < 0
+            or fixed_final_value % m != final_residue
+            or not (lo_f[t - 1] <= fixed_final_value // m <= hi_f[t - 1])
+        ):
+            return Inconsistent(final_index)
+        final_k = fixed_final_value // m
+
     lo_g = [0] * t
     hi_g = [0] * t
     lo_g[t - 1] = hi_g[t - 1] = final_k
     for j in range(t - 1, 0, -1):
-        lo_g[j - 1] = lo_g[j] - seg_qhi[j]
-        hi_g[j - 1] = hi_g[j] - seg_qlo[j]
+        q_lo = lo_f[j] - lo_f[j - 1]
+        q_hi = hi_f[j] - hi_f[j - 1]
+        lo_g[j - 1] = lo_g[j] - q_hi
+        hi_g[j - 1] = hi_g[j] - q_lo
 
-    # 后缀步长和：suffix_min[i] = sum(seg_min[i:n-1])，i ∈ [0, n-1]。
     suffix_min = [0] * n
     suffix_max = [0] * n
     for i in range(n - 2, -1, -1):
         suffix_min[i] = suffix_min[i + 1] + seg_min[i]
         suffix_max[i] = suffix_max[i + 1] + seg_max[i]
 
-    # ------------------------------------------------------------------
-    # 3) 左到右贪心重建。
-    #
-    # 段内当前边 d_i，已选前缀增量 P（段内 d_a..d_{i-1} 之和），剩余边
-    # 总增量 R ∈ [rlo, rhi]（连续整数区间）。段总量
-    #     P + d + R = m*x + e,   x = k_b - k_cur（本段回绕数），
-    # 且 x ∈ [T_lo - k_cur, T_hi - k_cur]。对固定 x：
-    #     d ∈ [m*x - P - rhi + e, m*x - P - rlo + e] ∩ [minStep, maxStep]。
-    # 取最小可行 x，再取区间内最小 d，即得字典序最优的当前 A 值。
-    # ------------------------------------------------------------------
     absolute: list[int] = [first_value]
     increments: list[int] = []
-
-    cur = first_value     # 当前绝对计数
-    k_cur = k0            # 当前已知点的回绕次数
-    P = 0                 # 段内已选增量之和
+    cur = first_value
+    k_cur = (first_value - seg_readings[0]) // m
+    P = 0
 
     for j in range(1, t):
         a = known_idx[j - 1]
@@ -280,6 +593,8 @@ def _solve_segment(
         t_hi = min(hi_f[j], hi_g[j])
         z_lo = t_lo - k_cur
         z_hi = t_hi - k_cur
+        q_lo = lo_f[j] - lo_f[j - 1]
+        q_hi = hi_f[j] - hi_f[j - 1]
 
         for i in range(a, b):
             lo_d = seg_min[i]
@@ -290,22 +605,19 @@ def _solve_segment(
                 rlo = suffix_min[i + 1] - suffix_min[b]
                 rhi = suffix_max[i + 1] - suffix_max[b]
 
-            # 由存在倍数 m*x 落在 [P+lo_d+rlo-e, P+hi_d+rhi-e] 求 x 范围。
             x_lo = _ceil_div(P + lo_d + rlo - e, m)
             x_hi = (P + hi_d + rhi - e) // m
-            x_lo = max(x_lo, z_lo, 0)
-            x_hi = min(x_hi, z_hi)
+            x_lo = max(x_lo, z_lo, q_lo if i == b - 1 else 0)
+            x_hi = min(x_hi, z_hi, q_hi if i == b - 1 else z_hi)
 
             chosen_d = None
             if x_lo <= x_hi:
                 x = x_lo
-                # d = m*x + e - P - R，R 取最大 rhi 时 d 最小，取最小 rlo 时最大。
                 d_star = max(lo_d, m * x + e - P - rhi)
                 if d_star <= min(hi_d, m * x + e - P - rlo):
                     chosen_d = d_star
                     chosen_x = x
             if chosen_d is None:
-                # 理论上不可达：区间传播已证明整体可行。防御性处理。
                 return Inconsistent(i + 1)
 
             cur += chosen_d
@@ -316,11 +628,7 @@ def _solve_segment(
                 k_cur += chosen_x
                 P = 0
 
-    # ------------------------------------------------------------------
-    # 4) 每位置累计回绕次数 wraps[i] = floor(A[i] / m)（A_i 非负）。
-    # ------------------------------------------------------------------
     cumulative_wraps = [a // m for a in absolute]
-
     return Solved(
         absolute=absolute,
         increments=increments,

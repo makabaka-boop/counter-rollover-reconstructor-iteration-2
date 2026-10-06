@@ -131,6 +131,44 @@ S = m·q + (r_b - r_a),  q 为非负整数（本段累计回绕数）
 回全局）时都不会产生局部成功轨迹。省略 `handoff`（或传 `null`）时请求
 与响应保持原样（仍返回 `cumulativeWraps`）。
 
+### 盘点锚点（可选 `inventoryAnchor`）
+
+人工盘点得到某个**已有读数位置**的绝对累计数后，可将它作为硬约束传入：
+
+```json
+{
+  "modulus": 10,
+  "readings": [8, 2, 30],
+  "minStep": [0, 0],
+  "maxStep": [20, 200],
+  "handoff": {
+    "position": 1,
+    "newModulus": 100,
+    "openingReading": 0
+  },
+  "inventoryAnchor": {
+    "position": 2,
+    "absoluteCount": 142
+  }
+}
+```
+
+- `inventoryAnchor.position`：必须是 `readings` 中非 `null` 的已有读数位置；
+- `inventoryAnchor.absoluteCount`：该位置经人工核准的非负绝对计数。
+
+求解器不会先恢复一条轨迹再检查是否“碰巧等于”锚点，而是先把锚点值连同
+各步区间一起传播。锚点位于交接之后时，旧表交接值 `A[h]` 与新表自身计数
+`B[p]` 必须共同满足
+`absoluteCount = A[h] + B[p] - openingReading`；算法用整圈数线性方程
+联合求解，不能将两段各自独立取最优后拼接。锚点位于交接点时，按同一物理
+时刻核对该绝对数。
+
+`inventoryAnchor.absoluteCount` 与位置读数不同余、圈数方程无解，或无法满足
+前后步长区间时，均属于合法请求但不可恢复：HTTP 200 返回
+`INCONSISTENT` 和最早无法延伸的位置，绝不返回半条轨迹。位置越界、指向
+`null`、绝对数为负或类型非法时返回 422。省略 `inventoryAnchor`（或传
+`null`）时，原有请求和响应字段保持不变。
+
 另有 `GET /health`。
 
 ## 运行
@@ -159,5 +197,8 @@ pytest -q
   确定性小实例，穷举两侧所有合法增量组合与开表读数，覆盖两侧漏抄、多圈
   回绕、交接边界 `h=0`/`h=n-1` 与大模数）、随机对拍、新表清零不报负耗用、
   两台表分别的回绕次数与无解位置换算；
+- `tests/test_anchor.py`：盘点锚点短序列穷举对拍，覆盖锚点在交接前、
+  交接点、交接后、空洞、两侧多圈回绕、起点换表时由锚点反推交接累计数，
+  以及非法同余/线性方程无解时的最早不可延伸位置；
 - `tests/test_api.py`：422 校验矩阵、成功/无解响应形态、交接 422 矩阵与
   两表回绕响应。
